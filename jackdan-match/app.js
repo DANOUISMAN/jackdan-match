@@ -57,6 +57,50 @@ async function saveProfile(patch) {
   if (error) throw error;
   Object.assign(S.profile, patch);
 }
+const VAPID = 'BF8lS93wvvgh_cC40FwxlyMj9ZXDh5oWDw4FB1_oPWg7DTFUvrCZt7WmfV18mvA07mguWuON52Kwlcu4Gf2SGjg';
+const pushOk = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let swReg = null;
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').then((r) => { swReg = r; }).catch(() => {});
+function b64u(s) { const p = '='.repeat((4 - (s.length % 4)) % 4); const b = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, (c) => c.charCodeAt(0)); }
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('ההתראות לא הודלקו. אפשר להדליק אותן בהגדרות הטלפון.'); return false; }
+  const reg = swReg || await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID) });
+  const j = sub.toJSON();
+  const { error } = await sb.from('push_subs').upsert({ endpoint: j.endpoint, user_id: S.user.id, p256dh: j.keys.p256dh, auth: j.keys.auth });
+  if (error) { toast('הדלקת ההתראות נכשלה, נסו שוב.'); return false; }
+  toast('ההתראות דולקות'); return true;
+}
+async function pushBanner() {
+  if (localStorage.getItem('jd_push_off')) return pushChip();
+  if (isIOS && !standalone()) return `<div class="box" id="pushbox"><b style="font-weight:500">רוצה התראות על הצעות והודעות?</b><br>באייפון: לוחצים על כפתור השיתוף ואז "הוסף למסך הבית", ופותחים את האפליקציה משם.</div>`;
+  if (!pushOk()) return '';
+  if (Notification.permission === 'granted') {
+    const reg = swReg || await navigator.serviceWorker.ready.catch(() => null);
+    if (reg && await reg.pushManager.getSubscription()) return '';
+  }
+  if (Notification.permission === 'denied') return '';
+  return `<div class="status" id="pushbox" style="background:#f5f5f5;color:#0a0a0a"><b style="font-weight:500;font-size:16px">שלא תפספס/י אף הצעה</b><span style="font-size:14px;color:#444">נשלח לך התראה כשמישהו רוצה להכיר, כשמגיעה הודעה וכשנשארות 10 שעות.</span>
+    <button class="btn" id="pushon" type="button" style="height:48px;font-size:16px">הדלקת התראות</button><button class="linkbtn" id="pushlater" type="button" style="align-self:center">לא עכשיו</button></div>`;
+}
+async function pushNeeded() {
+  if (isIOS && !standalone()) return 'ios';
+  if (!pushOk() || Notification.permission === 'denied') return null;
+  if (Notification.permission === 'granted') { const reg = swReg || await navigator.serviceWorker.ready.catch(() => null); if (reg && await reg.pushManager.getSubscription()) return null; }
+  return 'off';
+}
+async function pushChip() {
+  const n = await pushNeeded(); if (!n) return '';
+  if (n === 'ios') return '<div class="alert" id="pushbox" style="background:#f5f5f5;color:#333"><span>להתראות באייפון: שיתוף ← "הוסף למסך הבית"</span></div>';
+  return '<div class="alert" id="pushbox"><span>ההתראות כבויות. שלא תפספס/י הודעות</span><a href="#" id="pushon" role="button">הדלקה</a></div>';
+}
+function bindPush() {
+  const on = document.getElementById('pushon'); if (on) on.onclick = async (ev) => { ev.preventDefault(); on.disabled = true; if (await enablePush()) document.getElementById('pushbox')?.remove(); else on.disabled = false; };
+  const later = document.getElementById('pushlater'); if (later) later.onclick = () => { localStorage.setItem('jd_push_off', '1'); document.getElementById('pushbox')?.remove(); };
+}
 async function loadState() { const { data, error } = await sb.rpc('my_state'); if (!error) S.st = data; return S.st; }
 function nav(active) {
   const dot = S.st && S.st.incoming && S.st.incoming.length ? '<span class="dot" aria-label="הצעה חדשה"></span>' : '';
@@ -160,7 +204,7 @@ function step1() {
     <div class="top"><span class="brand">JackDan</span><a href="#/" class="linkbtn">חזרה</a></div>
     ${progress(1, 'פרטים')}
     <h1>נעים להכיר</h1>
-    <p class="muted">הפרופיל שלך מוצג רק למי שמתאים/ה לך, וגם את/ה לו/ה.</p>
+    <p class="muted">הפרופיל שלך מוצג רק לחברי הקהילה שנרשמו לאפליקציה.</p>
     <label class="field">שם פרטי<input name="name" autocomplete="given-name" maxlength="30"></label>
     <div class="group"><span class="label">אני</span>${chips('gender', [['m', 'גבר'], ['f', 'אישה']], null)}</div>
     <div class="row2">
@@ -280,13 +324,13 @@ function step4() {
   render(`<form class="screen" id="f">
     ${isEdit() ? '<div class="top"><span class="brand">JackDan</span></div>' : progress(4, 'מה אני מחפש/ת')}
     <h1>את מי את/ה מחפש/ת?</h1>
-    <p class="muted" style="font-size:14px">נציג לך רק אנשים שעומדים בזה, ורק אם גם את/ה מתאים/ה להם.</p>
+    <p class="muted" style="font-size:14px">מי שמתאים/ה לזה יופיע/ו אצלך ראשונים, עם אחוז התאמה גבוה יותר.</p>
     <div class="group"><span class="label">טווח גילאים</span><div class="row2">
       <label class="field">מגיל<input name="min" type="number" inputmode="numeric" min="18" max="99" value="${dMin}"></label>
       <label class="field">עד גיל<input name="max" type="number" inputmode="numeric" min="18" max="99" value="${dMax}"></label></div></div>
     <div class="group"><span class="label">אזור</span>${chips('area', [['city', 'רק בעיר שלי'], ['all', 'כל הארץ']], p.pref_area || 'all')}</div>
-    <div class="group"><span class="label">רמת דתיות (אפשר כמה, או אף אחת = לא משנה)</span>${chips('rel', REL, p.pref_religiosity || [], true)}</div>
-    <div class="group"><span class="label">בשום אופן לא</span><div class="chips">
+    <div class="group"><span class="label">רמת דתיות מועדפת (אפשר כמה, או אף אחת = לא משנה)</span>${chips('rel', REL, p.pref_religiosity || [], true)}</div>
+    <div class="group"><span class="label">פחות מתאים לי</span><div class="chips">
       <button type="button" class="chip${p.no_smoker ? ' on' : ''}" data-flag="no_smoker" aria-pressed="${!!p.no_smoker}">מעשן/ת</button>
       <button type="button" class="chip${p.no_kids ? ' on' : ''}" data-flag="no_kids" aria-pressed="${!!p.no_kids}">עם ילדים</button></div></div>
     <p class="err" id="err"></p>
@@ -357,11 +401,13 @@ async function home() {
   const matchHtml = matched.length ? `<div class="group"><h2>ממשיכים בפרטי</h2>${matched.map((m) => `<a href="#/match/${m.id}" class="list" style="text-decoration:none"><span style="display:flex;justify-content:space-between;padding:16px">${esc(m.partner.name)}<span class="small">לוואטסאפ ‹</span></span></a>`).join('')}</div>` : '';
   render(`<div class="screen">
     <div class="top"><span class="brand">JackDan</span><span class="small" style="font-size:14px">שלום ${esc(S.profile.name)}</span></div>
+    ${await pushBanner()}
     ${S.profile.frozen ? '<div class="box">הפרופיל שלך מוקפא ולא מוצג לאחרים. אפשר להחזיר אותו מהפרופיל.</div>' : ''}
     ${main}${incHtml}${matchHtml}
     <div class="group"><h2>איך זה עובד</h2><div class="box" style="background:#fff;border:1px solid #e4e4e4">
       1. גוללים בהתאמות ושולחים הצעה אחת בכל פעם.<br>2. אם הצד השני מאשר, יש לכם 48 שעות לדבר.<br>3. שניכם רוצים להמשיך? מקבלים את הוואטסאפ.</div></div>
   </div>${nav('home')}`);
+  bindPush();
   const tick = () => app.querySelectorAll('[data-ends]').forEach((el) => { el.textContent = hms(new Date(el.dataset.ends) - Date.now()); });
   tick(); every(1000, tick);
   every(30000, async () => { const before = JSON.stringify(S.st); await loadState(); if (JSON.stringify(S.st) !== before && location.hash === '#/home') route(); });
@@ -380,10 +426,11 @@ async function browse() {
       const a = document.getElementById('again'); if (a) a.onclick = () => { i = 0; draw(); };
       return;
     }
-    const m = list[i], urls = await signedUrls(m.photos || []);
+    const m = list[i], urls = await signedUrls(m.photos || []); const chip = await pushChip();
     const tags = [m.religiosity, m.occupation].filter(Boolean);
     render(`<div class="screen">
       <div class="top"><span class="brand">JackDan</span><span class="small" style="font-size:13px">${i + 1} מתוך ${list.length}</span></div>
+      ${chip}
       <div class="card">
         <div class="ph" id="ph">${urls[ph] ? `<img src="${esc(urls[ph])}" alt="תמונה של ${esc(m.name)}">` : icon.user}
           <span class="badge">${m.score}% התאמה</span>
@@ -397,6 +444,7 @@ async function browse() {
       <div style="display:flex;gap:10px"><button class="btn ghost" style="width:110px;height:54px" id="next" type="button">הבא</button>
         <button class="btn" id="send" type="button" ${S.st.busy ? 'disabled' : ''}>שליחת הצעה</button></div>
     </div>${nav('browse')}`);
+    bindPush();
     document.getElementById('ph').onclick = () => { if (urls.length > 1) { ph = (ph + 1) % urls.length; draw(); } };
     document.getElementById('next').onclick = () => { i++; ph = 0; draw(); };
     document.getElementById('send').onclick = async (e) => {
@@ -413,10 +461,11 @@ async function proposal(id) {
   await loadState();
   const x = (S.st.incoming || []).find((p) => p.id === id);
   if (!x) { toast('ההצעה כבר לא בתוקף'); go('#/home'); return; }
-  const m = x.person, urls = await signedUrls(m.photos || []); let ph = 0;
+  const m = x.person, urls = await signedUrls(m.photos || []); let ph = 0; const chip = await pushChip();
   const draw = () => {
     render(`<div class="screen">
       <div class="top"><span class="brand">JackDan</span><span class="small">הצעה חדשה · עוד <b data-ends="${x.expires_at}" style="font-weight:500;direction:ltr">--</b></span></div>
+      ${chip}
       <h1>${esc(m.name)} רוצה להכיר אותך</h1>
       <div class="card"><div class="ph" id="ph">${urls[ph] ? `<img src="${esc(urls[ph])}" alt="תמונה של ${esc(m.name)}">` : icon.user}<span class="badge">${m.score}% התאמה</span>
         ${urls.length > 1 ? `<div class="dots">${urls.map((_, j) => `<i class="${j === ph ? 'on' : ''}"></i>`).join('')}</div>` : ''}</div>
@@ -427,6 +476,7 @@ async function proposal(id) {
       <p class="small" style="text-align:center">התשובה שלך דיסקרטית. אם תסרב/י, הצד השני לא יידע מי.</p>
     </div>${nav('home')}`);
     document.getElementById('ph').onclick = () => { if (urls.length > 1) { ph = (ph + 1) % urls.length; draw(); } };
+    bindPush();
     document.getElementById('yes').onclick = async (e) => {
       e.target.disabled = true; const { error } = await sb.rpc('respond_proposal', { pid: id, accept: true });
       if (error) { toast(errMsg(error)); e.target.disabled = false; return; } go(`#/chat/${id}`);
@@ -454,11 +504,13 @@ async function chat(id) {
       <div class="timer" role="timer" aria-label="הזמן שנשאר לשיחה" id="timer">${icon.clock}<span id="left">--:--:--</span></div>
       <button type="button" id="report" aria-label="דיווח או חסימה" style="width:40px;height:40px;border:none;background:none;cursor:pointer">${icon.flag}</button>
     </header>
+    ${await pushChip()}
     <div id="alert"></div>
-    <div class="msgs" id="msgs"><div class="sys"><b style="font-weight:500">JackDan:</b> נעים להכיר! יש לכם 48 שעות להכיר. מספרי הטלפון מוסתרים עד ששניכם תבחרו להמשיך.</div>${(msgs || []).map(msgHtml).join('')}</div>
+    <div class="msgs" id="msgs"><div class="sys" style="text-align:right;max-width:320px"><b style="font-weight:500">איך זה עובד? בקצרה:</b><br>יש לכם 48 שעות להכיר כאן בצ'אט. מרגישים שזה זה? כל אחד לוחץ "להמשיך בפרטי" ומשאיר לשדכן מספר וואטסאפ. רק כששניכם מוכנים, השדכן מעביר לכם את המספרים.<br>אם תוך 48 שעות זה לא קרה, כנראה שזה לא השידוך, והשיחה תיסגר בכבוד. בהצלחה!</div>${(msgs || []).map(msgHtml).join('')}</div>
     ${c.open ? `<form class="composer" id="cf"><label style="flex:1;display:flex"><span style="position:absolute;width:1px;height:1px;overflow:hidden">הודעה</span><input id="txt" autocomplete="off" maxlength="1000" placeholder="כתיבת הודעה…"></label><button type="submit" aria-label="שליחה">${icon.send}</button></form>`
       : '<div class="box" style="margin:12px">השיחה נסגרה.</div>'}
   </section>`);
+  bindPush();
   const box = document.getElementById('msgs'); box.scrollTop = box.scrollHeight;
   const tick = () => {
     const left = ends - Date.now(); document.getElementById('left').textContent = hms(left);
@@ -493,14 +545,14 @@ async function decide(id) {
   const c = (S.st.chats || []).find((x) => x.id === id);
   if (!c || !c.open) { go('#/home'); return; }
   if (c.matched) { go(`#/match/${id}`); return; }
-  let step = c.my_decision === true ? 'waiting' : 'ask';
+  let step = c.my_decision === true ? 'waiting' : 'ask'; const chip = await pushChip();
   const draw = () => {
     const body = step === 'ask' ? `<h1>רוצה להמשיך להכיר את ${esc(c.partner.name)}?</h1>
         <p class="muted">אם שניכם תבחרו להמשיך, תמשיכו לדבר באופן פרטי. אם לא, השיחה תיסגר בכבוד, ואף אחד לא יידע מי בחר מה.</p>
         <div class="grow"></div><button class="btn" id="yes" type="button">כן, להמשיך</button><button class="btn ghost" id="no" type="button">לסגור בכבוד</button>
         <p class="small" style="text-align:center">אם לא תבחר/י עד שהזמן נגמר, השיחה תיסגר מעצמה</p>`
       : step === 'phone' ? `<h1>איזה כיף! עוד צעד קטן</h1>
-        <p class="muted">השאר/י מספר וואטסאפ. ברגע ששניכם תאשרו ותמלאו מספר, האפליקציה תשלח לכם את המספרים ותמשיכו לדבר בפרטי.</p>
+        <p class="muted">השאר/י מספר וואטסאפ. ברגע ששניכם תאשרו ותמלאו מספר, השדכן יעביר לכם את המספרים ותמשיכו לדבר בפרטי.</p>
         <label class="field">מספר וואטסאפ<input id="wa" type="tel" inputmode="tel" value="${esc(S.profile.phone)}" dir="ltr" style="text-align:right;font-size:17px"></label>
         <p class="err" id="err"></p><div class="grow"></div><button class="btn" id="send" type="button">אישור ושליחה</button>
         <p class="small" style="text-align:center">המספר נשמר אצלנו ונחשף לצד השני רק אם גם הוא מאשר</p>`
@@ -508,7 +560,8 @@ async function decide(id) {
         <h1>שמרנו! עכשיו מחכים ל${esc(c.partner.name)}</h1><p class="muted">ברגע שגם הצד השני יאשר וימלא מספר, תקבלו שניכם מיד את מספרי הוואטסאפ. אנחנו מחזיקים לכם אצבעות.</p></div>
         <div class="grow"></div><a href="#/chat/${id}" class="btn ghost">חזרה לצ'אט</a>`;
     render(`<div class="screen"><div class="top"><span class="brand">JackDan</span><a href="#/chat/${id}" class="linkbtn">חזרה לצ'אט</a></div>
-      <div class="clock">${icon.clock.replace('width="14" height="14"', 'width="30" height="30"')}<b id="left">--:--:--</b><span style="font-size:14px;color:#cfcfcf">נשארו לשיחה עם ${esc(c.partner.name)}</span></div>${body}</div>`);
+      ${chip}<div class="clock">${icon.clock.replace('width="14" height="14"', 'width="30" height="30"')}<b id="left">--:--:--</b><span style="font-size:14px;color:#cfcfcf">נשארו לשיחה עם ${esc(c.partner.name)}</span></div>${body}</div>`);
+    bindPush();
     const y = document.getElementById('yes'); if (y) y.onclick = () => { step = 'phone'; draw(); };
     const n = document.getElementById('no'); if (n) n.onclick = async () => { await sb.rpc('decide', { pid: id, keep: false, wa: null }); toast('השיחה נסגרה בכבוד'); go('#/home'); };
     const s = document.getElementById('send'); if (s) s.onclick = async () => {
@@ -558,10 +611,12 @@ async function profile() {
     <div class="list" style="flex-direction:row;align-items:center;justify-content:space-between;padding:14px 16px;gap:12px">
       <span style="display:flex;flex-direction:column;gap:2px"><b style="font-weight:500">הקפאת פרופיל</b><span class="small">לא תופיע/י אצל אחרים עד שתחזיר/י</span></span>
       <button type="button" class="switch" role="switch" aria-checked="${!!p.frozen}" aria-label="הקפאת פרופיל" id="freeze"><i></i></button></div>
+    ${pushOk() && Notification.permission !== 'granted' ? '<button class="btn ghost" id="pushon" type="button">הדלקת התראות</button>' : ''}
     <div class="grow"></div>
     <button class="btn ghost" id="logout" type="button">התנתקות</button>
     <button class="linkbtn" id="del" type="button" style="color:#a32d2d">מחיקת החשבון</button>
   </div>${nav('profile')}`);
+  bindPush();
   document.getElementById('freeze').onclick = async (e) => { const v = !S.profile.frozen; await saveProfile({ frozen: v }); e.currentTarget.setAttribute('aria-checked', v); toast(v ? 'הפרופיל מוקפא' : 'הפרופיל חזר להופיע'); };
   document.getElementById('logout').onclick = async () => { await sb.auth.signOut(); S.user = null; S.profile = null; go('#/'); };
   document.getElementById('del').onclick = async (e) => {
